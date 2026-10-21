@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"strings"
@@ -21,26 +22,37 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-const testToken = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+const (
+	sidecarToken = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" // inbound: Nebo → sidecar
+	appToken     = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210" // outbound: sidecar → Nebo's API
+)
 
-func TestNewRequiresToken(t *testing.T) {
-	t.Setenv("NEBO_APP_TOKEN", "")
+func TestNewRequiresSidecarToken(t *testing.T) {
+	t.Setenv("NEBO_SIDECAR_TOKEN", "")
+	t.Setenv("NEBO_APP_TOKEN", appToken)
 	_, err := New()
-	if err != ErrNoToken {
-		t.Fatalf("expected ErrNoToken, got %v", err)
+	if err != ErrNoSidecarToken {
+		t.Fatalf("expected ErrNoSidecarToken, got %v", err)
 	}
 }
 
-func TestNewWithToken(t *testing.T) {
-	t.Setenv("NEBO_APP_TOKEN", testToken)
+func TestNewKeepsSidecarTokenOutOfUserCode(t *testing.T) {
+	t.Setenv("NEBO_SIDECAR_TOKEN", sidecarToken)
+	t.Setenv("NEBO_APP_TOKEN", appToken)
 	t.Setenv("NEBO_APP_NAME", "test-app")
 
 	app, err := New()
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if app.env.Token != testToken {
-		t.Errorf("Token = %q, want %q", app.env.Token, testToken)
+	if app.sidecarToken != sidecarToken {
+		t.Errorf("sidecarToken = %q, want %q", app.sidecarToken, sidecarToken)
+	}
+	if v, ok := os.LookupEnv("NEBO_SIDECAR_TOKEN"); ok {
+		t.Errorf("NEBO_SIDECAR_TOKEN still in the environment: %q", v)
+	}
+	if app.Env().Token != appToken {
+		t.Errorf("Env().Token = %q, want the outbound %q", app.Env().Token, appToken)
 	}
 	if app.env.Name != "test-app" {
 		t.Errorf("Name = %q, want test-app", app.env.Name)
@@ -48,7 +60,7 @@ func TestNewWithToken(t *testing.T) {
 }
 
 func TestRunWithNoHandlers(t *testing.T) {
-	t.Setenv("NEBO_APP_TOKEN", testToken)
+	t.Setenv("NEBO_SIDECAR_TOKEN", sidecarToken)
 
 	app, err := New()
 	if err != nil {
@@ -91,6 +103,7 @@ func TestMain(m *testing.M) {
 		}
 		app.RegisterTool(echoTool{})
 		app.RegisterGateway(emptyGateway{})
+		app.HandleFunc("GET /ping", func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, "pong") })
 		if err := app.Run(); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
@@ -112,7 +125,7 @@ type sidecar struct {
 func startSidecar(t *testing.T) *sidecar {
 	t.Helper()
 	cmd := exec.Command(os.Args[0])
-	cmd.Env = append(os.Environ(), sidecarEnv+"=1", "NEBO_APP_TOKEN="+testToken, "NEBO_APP_NAME=test-app")
+	cmd.Env = append(os.Environ(), sidecarEnv+"=1", "NEBO_SIDECAR_TOKEN="+sidecarToken, "NEBO_APP_TOKEN="+appToken, "NEBO_APP_NAME=test-app")
 	cmd.Stderr = os.Stderr
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -189,24 +202,31 @@ func TestRunListensOnLoopbackAndAnnounces(t *testing.T) {
 	}
 }
 
-func TestRunRefusesCallsWithoutToken(t *testing.T) {
+func TestRunRefusesCallsWithoutSidecarToken(t *testing.T) {
 	r := startSidecar(t)
 	conn := dial(t, r.addr)
 	tool := pb.NewToolServiceClient(conn)
 	gateway := pb.NewGatewayServiceClient(conn)
+	ui := pb.NewUIServiceClient(conn)
 
 	for _, tc := range []struct {
 		name string
 		auth string
 	}{
 		{"missing", ""},
-		{"wrong token", "Bearer " + strings.Repeat("f", len(testToken))},
-		{"no scheme", testToken},
+		{"wrong token", "Bearer " + strings.Repeat("f", len(sidecarToken))},
+		{"outbound app token", "Bearer " + appToken},
+		{"no scheme", sidecarToken},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := tool.Name(withAuth(t, tc.auth), &pb.Empty{})
 			if status.Code(err) != codes.Unauthenticated {
 				t.Errorf("unary: got %v, want Unauthenticated", err)
+			}
+
+			_, err = ui.HealthCheck(withAuth(t, tc.auth), &pb.HealthCheckRequest{})
+			if status.Code(err) != codes.Unauthenticated {
+				t.Errorf("UI health check: got %v, want Unauthenticated", err)
 			}
 
 			stream, err := gateway.Stream(withAuth(t, tc.auth), &pb.GatewayRequest{})
@@ -220,11 +240,11 @@ func TestRunRefusesCallsWithoutToken(t *testing.T) {
 	}
 }
 
-func TestRunAcceptsCallsWithToken(t *testing.T) {
+func TestRunAcceptsCallsWithSidecarToken(t *testing.T) {
 	r := startSidecar(t)
 	conn := dial(t, r.addr)
 
-	resp, err := pb.NewToolServiceClient(conn).Name(withAuth(t, "Bearer "+testToken), &pb.Empty{})
+	resp, err := pb.NewToolServiceClient(conn).Name(withAuth(t, "Bearer "+sidecarToken), &pb.Empty{})
 	if err != nil {
 		t.Fatalf("unary: %v", err)
 	}
@@ -232,7 +252,16 @@ func TestRunAcceptsCallsWithToken(t *testing.T) {
 		t.Errorf("Name = %q, want echo", resp.Name)
 	}
 
-	stream, err := pb.NewGatewayServiceClient(conn).Stream(withAuth(t, "Bearer "+testToken), &pb.GatewayRequest{})
+	// Nebo's health probe.
+	health, err := pb.NewUIServiceClient(conn).HealthCheck(withAuth(t, "Bearer "+sidecarToken), &pb.HealthCheckRequest{})
+	if err != nil {
+		t.Fatalf("UI health check: %v", err)
+	}
+	if !health.Healthy {
+		t.Error("UI health check: Healthy = false, want true")
+	}
+
+	stream, err := pb.NewGatewayServiceClient(conn).Stream(withAuth(t, "Bearer "+sidecarToken), &pb.GatewayRequest{})
 	if err != nil {
 		t.Fatalf("stream: %v", err)
 	}

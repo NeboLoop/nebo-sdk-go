@@ -1,7 +1,7 @@
 // Package nebo provides the SDK for building Nebo apps.
 //
 // A Nebo app is a compiled binary that serves gRPC to Nebo on a loopback TCP port.
-// The SDK handles the listener, the app token check, shutdown when Nebo goes away, and
+// The SDK handles the listener, the sidecar token check, shutdown when Nebo goes away, and
 // protocol bridging — you just implement handler interfaces for the capabilities your
 // app provides.
 //
@@ -40,21 +40,25 @@ const stopGrace = 5 * time.Second
 // App is the main entry point for a Nebo app. It manages the gRPC server,
 // capability registration, and lifecycle.
 type App struct {
-	env         *AppEnv
-	server      *grpc.Server
-	onConfigure func(map[string]string)
-	hasHandlers bool
-	mux         *http.ServeMux
+	env          *AppEnv
+	sidecarToken string // NEBO_SIDECAR_TOKEN: every call from Nebo carries it
+	server       *grpc.Server
+	onConfigure  func(map[string]string)
+	hasHandlers  bool
+	mux          *http.ServeMux
 }
 
 // New creates a new Nebo App. It reads the NEBO_* environment variables and
-// prepares the gRPC server. Returns ErrNoToken if NEBO_APP_TOKEN is not set.
+// prepares the gRPC server. It takes NEBO_SIDECAR_TOKEN out of the environment,
+// so your code and its child processes never see it. Returns ErrNoSidecarToken
+// if NEBO_SIDECAR_TOKEN is not set.
 func New() (*App, error) {
-	env := loadEnv()
-	if env.Token == "" {
-		return nil, ErrNoToken
+	sidecarToken := os.Getenv("NEBO_SIDECAR_TOKEN")
+	if sidecarToken == "" {
+		return nil, ErrNoSidecarToken
 	}
-	a := &App{env: env}
+	os.Unsetenv("NEBO_SIDECAR_TOKEN")
+	a := &App{env: loadEnv(), sidecarToken: sidecarToken}
 	a.server = grpc.NewServer(
 		grpc.UnaryInterceptor(func(ctx context.Context, req any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 			if err := a.authorize(ctx); err != nil {
@@ -72,12 +76,12 @@ func New() (*App, error) {
 	return a, nil
 }
 
-// authorize refuses a call unless it carries "authorization: Bearer <NEBO_APP_TOKEN>".
+// authorize refuses a call unless it carries "authorization: Bearer <NEBO_SIDECAR_TOKEN>".
 func (a *App) authorize(ctx context.Context) error {
 	md, _ := metadata.FromIncomingContext(ctx)
 	values := md.Get("authorization")
-	if len(values) != 1 || subtle.ConstantTimeCompare([]byte(values[0]), []byte("Bearer "+a.env.Token)) != 1 {
-		return status.Error(codes.Unauthenticated, "missing or invalid app token")
+	if len(values) != 1 || subtle.ConstantTimeCompare([]byte(values[0]), []byte("Bearer "+a.sidecarToken)) != 1 {
+		return status.Error(codes.Unauthenticated, "missing or invalid sidecar token")
 	}
 	return nil
 }
@@ -168,7 +172,7 @@ func (a *App) RegisterSchedule(h ScheduleHandler) {
 // Run serves gRPC on a free loopback port and blocks until Nebo goes away.
 //
 // It listens on 127.0.0.1:0, announces the address to Nebo with one stdout line
-// ("nebo-app-listening <ip:port>"), and refuses every call that lacks the app token.
+// ("nebo-app-listening <ip:port>"), and refuses every call that lacks the sidecar token.
 // It stops when stdin reaches EOF (Nebo is gone) or on SIGTERM/SIGINT.
 func (a *App) Run() error {
 	if !a.hasHandlers {
