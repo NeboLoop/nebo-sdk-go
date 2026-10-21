@@ -6,6 +6,7 @@ import "os"
 // your app. Nebo clears the environment first, so these are the only NEBO_*
 // variables your app sees. The inbound NEBO_SIDECAR_TOKEN is not here: the
 // SDK takes it in New() and checks it on every call, so your code never needs it.
+// The SDK also uses Token to answer Nebo's health challenge.
 type AppEnv struct {
 	Dir     string // NEBO_APP_DIR — the app's (versioned) code directory
 	ID      string // NEBO_APP_ID — app ID from manifest

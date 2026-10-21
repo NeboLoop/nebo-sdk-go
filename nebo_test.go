@@ -3,13 +3,17 @@ package nebo
 import (
 	"bufio"
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
-	"net/http"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -33,6 +37,15 @@ func TestNewRequiresSidecarToken(t *testing.T) {
 	_, err := New()
 	if err != ErrNoSidecarToken {
 		t.Fatalf("expected ErrNoSidecarToken, got %v", err)
+	}
+}
+
+func TestNewRequiresAppToken(t *testing.T) {
+	t.Setenv("NEBO_SIDECAR_TOKEN", sidecarToken)
+	t.Setenv("NEBO_APP_TOKEN", "")
+	_, err := New()
+	if err != ErrNoAppToken {
+		t.Fatalf("expected ErrNoAppToken, got %v", err)
 	}
 }
 
@@ -61,6 +74,7 @@ func TestNewKeepsSidecarTokenOutOfUserCode(t *testing.T) {
 
 func TestRunWithNoHandlers(t *testing.T) {
 	t.Setenv("NEBO_SIDECAR_TOKEN", sidecarToken)
+	t.Setenv("NEBO_APP_TOKEN", appToken)
 
 	app, err := New()
 	if err != nil {
@@ -103,7 +117,6 @@ func TestMain(m *testing.M) {
 		}
 		app.RegisterTool(echoTool{})
 		app.RegisterGateway(emptyGateway{})
-		app.HandleFunc("GET /ping", func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, "pong") })
 		if err := app.Run(); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
@@ -281,5 +294,96 @@ func TestRunExitsWhenStdinCloses(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("sidecar did not exit after stdin closed")
+	}
+}
+
+// TestHealthProofVector is the shared vector every SDK and Nebo must produce.
+func TestHealthProofVector(t *testing.T) {
+	nonce, _ := hex.DecodeString("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
+	const want = "f67ca363caac14eb7f345df8c7548d11a40334c55d255e30ec02339265ed8db8"
+	if got := healthProof(appToken, sidecarToken, nonce, 54321); got != want {
+		t.Fatalf("healthProof = %s, want %s", got, want)
+	}
+}
+
+// hmacHex computes the proof formula independently of the SDK: hex HMAC-SHA256(key, nonce || sidecar token || port BE u16).
+func hmacHex(key string, nonce []byte, port uint16) string {
+	mac := hmac.New(sha256.New, []byte(key))
+	mac.Write(nonce)
+	mac.Write([]byte(sidecarToken))
+	mac.Write([]byte{byte(port >> 8), byte(port)})
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// probe sends Nebo's health probe with the given challenge and returns the x-nebo-proof header.
+func probe(t *testing.T, conn *grpc.ClientConn, challenge string) []string {
+	t.Helper()
+	ctx := withAuth(t, "Bearer "+sidecarToken)
+	if challenge != "" {
+		ctx = metadata.AppendToOutgoingContext(ctx, "x-nebo-challenge", challenge)
+	}
+	var header metadata.MD
+	resp, err := pb.NewUIServiceClient(conn).HealthCheck(ctx, &pb.HealthCheckRequest{}, grpc.Header(&header))
+	if err != nil {
+		t.Fatalf("health check: %v", err)
+	}
+	if !resp.Healthy {
+		t.Error("Healthy = false, want true")
+	}
+	return header.Get("x-nebo-proof")
+}
+
+func TestRunAnswersHealthChallenge(t *testing.T) {
+	r := startSidecar(t)
+	conn := dial(t, r.addr)
+	_, portStr, _ := net.SplitHostPort(r.addr)
+	port, err := strconv.ParseUint(portStr, 10, 16)
+	if err != nil {
+		t.Fatalf("announced port %q: %v", portStr, err)
+	}
+
+	nonce := make([]byte, 32)
+	rand.Read(nonce)
+	proof := probe(t, conn, hex.EncodeToString(nonce))
+	if len(proof) != 1 {
+		t.Fatalf("x-nebo-proof = %v, want one value", proof)
+	}
+	want := hmacHex(appToken, nonce, uint16(port))
+	if !hmac.Equal([]byte(proof[0]), []byte(want)) {
+		t.Fatalf("proof = %s, want %s", proof[0], want)
+	}
+
+	// A process that captured the inbound sidecar token can only key the HMAC with it.
+	if imposter := hmacHex(sidecarToken, nonce, uint16(port)); imposter == want {
+		t.Fatal("an imposter keyed with the sidecar token produced the real proof")
+	}
+}
+
+func TestRunGivesNoProofWithoutValidChallenge(t *testing.T) {
+	r := startSidecar(t)
+	conn := dial(t, r.addr)
+
+	for _, tc := range []struct{ name, challenge string }{
+		{"missing", ""},
+		{"not hex", strings.Repeat("z", 64)},
+		{"short", "0001020304"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if proof := probe(t, conn, tc.challenge); len(proof) != 0 {
+				t.Errorf("x-nebo-proof = %v, want none", proof)
+			}
+		})
+	}
+}
+
+// The test sidecar registers no HTTP handlers: UIService still answers the health
+// probe (above) and HandleRequest is Unimplemented.
+func TestRunServesUIServiceWithoutHTTPHandlers(t *testing.T) {
+	r := startSidecar(t)
+	conn := dial(t, r.addr)
+
+	_, err := pb.NewUIServiceClient(conn).HandleRequest(withAuth(t, "Bearer "+sidecarToken), &pb.HttpRequest{Method: "GET", Path: "/"})
+	if status.Code(err) != codes.Unimplemented {
+		t.Fatalf("HandleRequest: got %v, want Unimplemented", err)
 	}
 }

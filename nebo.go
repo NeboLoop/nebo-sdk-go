@@ -51,14 +51,19 @@ type App struct {
 // New creates a new Nebo App. It reads the NEBO_* environment variables and
 // prepares the gRPC server. It takes NEBO_SIDECAR_TOKEN out of the environment,
 // so your code and its child processes never see it. Returns ErrNoSidecarToken
-// if NEBO_SIDECAR_TOKEN is not set.
+// if NEBO_SIDECAR_TOKEN is not set, and ErrNoAppToken if NEBO_APP_TOKEN is not
+// set (the SDK needs it to prove itself to Nebo's health probe).
 func New() (*App, error) {
 	sidecarToken := os.Getenv("NEBO_SIDECAR_TOKEN")
 	if sidecarToken == "" {
 		return nil, ErrNoSidecarToken
 	}
+	env := loadEnv()
+	if env.Token == "" {
+		return nil, ErrNoAppToken
+	}
 	os.Unsetenv("NEBO_SIDECAR_TOKEN")
-	a := &App{env: loadEnv(), sidecarToken: sidecarToken}
+	a := &App{env: env, sidecarToken: sidecarToken}
 	a.server = grpc.NewServer(
 		grpc.UnaryInterceptor(func(ctx context.Context, req any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 			if err := a.authorize(ctx); err != nil {
@@ -179,15 +184,6 @@ func (a *App) Run() error {
 		return ErrNoHandlers
 	}
 
-	// Register UI service if HandleFunc/Handle was called
-	if a.mux != nil {
-		pb.RegisterUIServiceServer(a.server, &uiBridge{
-			mux:         a.mux,
-			onConfigure: a.onConfigure,
-			env:         a.env,
-		})
-	}
-
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 	defer signal.Stop(sigCh)
@@ -196,6 +192,17 @@ func (a *App) Run() error {
 	if err != nil {
 		return fmt.Errorf("listen on loopback: %w", err)
 	}
+
+	// UIService is always served: its HealthCheck is Nebo's health probe and answers
+	// the challenge. HandleRequest is Unimplemented unless HandleFunc/Handle was called.
+	pb.RegisterUIServiceServer(a.server, &uiBridge{
+		mux:          a.mux,
+		onConfigure:  a.onConfigure,
+		env:          a.env,
+		sidecarToken: a.sidecarToken,
+		port:         uint16(listener.Addr().(*net.TCPAddr).Port),
+	})
+
 	// The one line that tells Nebo where to connect.
 	if _, err := fmt.Fprintf(os.Stdout, "nebo-app-listening %s\n", listener.Addr()); err != nil {
 		listener.Close()

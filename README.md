@@ -80,7 +80,8 @@ Nebo launches your app binary and talks to it over gRPC. `app.Run()` does all of
 1. Listens on a free loopback port (`127.0.0.1:0`).
 2. Prints one line to stdout, `nebo-app-listening 127.0.0.1:<port>`, so Nebo knows where to connect. Write your own logs to stderr or stdout after that; they go to the app's `sidecar.log`.
 3. Refuses every call that does not carry `authorization: Bearer <NEBO_SIDECAR_TOKEN>`, Nebo's health probe included.
-4. Returns `nil` when stdin closes (Nebo is gone) or on SIGTERM/SIGINT, so your app exits cleanly.
+4. Answers Nebo's health probe (`UIService.HealthCheck`, served even if your app registers no HTTP handlers) with a proof only the holder of `NEBO_APP_TOKEN` can compute, so a process that took over your port can't pass for your app.
+5. Returns `nil` when stdin closes (Nebo is gone) or on SIGTERM/SIGINT, so your app exits cleanly.
 
 ## Environment
 
@@ -94,10 +95,10 @@ Nebo clears the environment and sets these. Read them with `app.Env()`.
 | `NEBO_APP_DIR` | `Dir` | The app's (versioned) code folder |
 | `NEBO_DATA_DIR` | `DataDir` | The app's persistent data folder; also the working directory |
 | `NEBO_API_URL` | `APIURL` | Nebo's local API, `http://127.0.0.1:<port>` |
-| `NEBO_APP_TOKEN` | `Token` | Outbound token: send it when your app calls `NEBO_API_URL`. Nebo never sends it to your app |
+| `NEBO_APP_TOKEN` | `Token` | Outbound token: send it when your app calls `NEBO_API_URL`. Nebo never sends it to your app. `nebo.New()` requires it; the SDK also uses it for the health proof |
 | `NEBO_SIDECAR_TOKEN` | (none) | Inbound token: every call from Nebo carries it. `nebo.New()` requires it, checks it for you and removes it from the environment |
 
-Nebo gives each launch two different tokens. If another local process ever took over your app's port, the inbound token it could capture opens nothing on Nebo.
+Nebo gives each launch two different tokens. If another local process ever took over your app's port, the inbound token it could capture opens nothing on Nebo, and without `NEBO_APP_TOKEN` it can't answer the health probe, so Nebo stops and relaunches your app.
 
 When your app calls its own routes on Nebo's API, send `Token`:
 
