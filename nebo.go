@@ -9,7 +9,9 @@
 //
 //	app, _ := nebo.New()
 //	app.RegisterTool(&MyTool{})
-//	log.Fatal(app.Run())
+//	if err := app.Run(); err != nil {
+//		log.Fatal(err)
+//	}
 package nebo
 
 import (

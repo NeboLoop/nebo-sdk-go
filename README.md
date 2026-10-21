@@ -67,7 +67,9 @@ func main() {
         log.Fatal(err)
     }
     app.RegisterTool(&Calculator{})
-    log.Fatal(app.Run())
+    if err := app.Run(); err != nil {
+        log.Fatal(err)
+    }
 }
 ```
 
@@ -78,7 +80,7 @@ Nebo launches your app binary and talks to it over gRPC. `app.Run()` does all of
 1. Listens on a free loopback port (`127.0.0.1:0`).
 2. Prints one line to stdout, `nebo-app-listening 127.0.0.1:<port>`, so Nebo knows where to connect. Write your own logs to stderr or stdout after that; they go to the app's `sidecar.log`.
 3. Refuses every call that does not carry `authorization: Bearer <NEBO_APP_TOKEN>`.
-4. Exits when stdin closes (Nebo is gone) or on SIGTERM/SIGINT.
+4. Returns `nil` when stdin closes (Nebo is gone) or on SIGTERM/SIGINT, so your app exits cleanly.
 
 ## Environment
 

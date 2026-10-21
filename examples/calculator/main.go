@@ -57,5 +57,7 @@ func main() {
 		log.Fatal(err)
 	}
 	app.RegisterTool(&Calculator{})
-	log.Fatal(app.Run())
+	if err := app.Run(); err != nil {
+		log.Fatal(err)
+	}
 }
