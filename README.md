@@ -71,6 +71,37 @@ func main() {
 }
 ```
 
+## How Your App Runs
+
+Nebo launches your app binary and talks to it over gRPC. `app.Run()` does all of this for you:
+
+1. Listens on a free loopback port (`127.0.0.1:0`).
+2. Prints one line to stdout, `nebo-app-listening 127.0.0.1:<port>`, so Nebo knows where to connect. Write your own logs to stderr or stdout after that; they go to the app's `sidecar.log`.
+3. Refuses every call that does not carry `authorization: Bearer <NEBO_APP_TOKEN>`.
+4. Exits when stdin closes (Nebo is gone) or on SIGTERM/SIGINT.
+
+## Environment
+
+Nebo clears the environment and sets these. Read them with `app.Env()`.
+
+| Variable | `AppEnv` field | Meaning |
+|----------|----------------|---------|
+| `NEBO_APP_ID` | `ID` | App ID from the manifest |
+| `NEBO_APP_NAME` | `Name` | App name |
+| `NEBO_APP_VERSION` | `Version` | App version |
+| `NEBO_APP_DIR` | `Dir` | The app's (versioned) code folder |
+| `NEBO_DATA_DIR` | `DataDir` | The app's persistent data folder; also the working directory |
+| `NEBO_API_URL` | `APIURL` | Nebo's local API, `http://127.0.0.1:<port>` |
+| `NEBO_APP_TOKEN` | `Token` | Per-launch secret. `nebo.New()` fails without it |
+
+When your app calls its own routes on Nebo's API, send the token:
+
+```go
+env := app.Env()
+req, _ := http.NewRequest("GET", env.APIURL+"/api/v1/apps/"+env.ID+"/storage", nil)
+req.Header.Set("Authorization", "Bearer "+env.Token)
+```
+
 ## Handler Interfaces
 
 | Capability | Interface | Manifest `provides` |
@@ -78,7 +109,7 @@ func main() {
 | Tool | `ToolHandler` | `tool:<name>` |
 | Channel | `ChannelHandler` | `channel:<name>` |
 | Gateway | `GatewayHandler` | `gateway` |
-| UI | `UIHandler` | `ui` |
+| UI | `HandleFunc` / `Handle` | `ui` |
 | Comm | `CommHandler` | `comm` |
 | Schedule | `ScheduleHandler` | `schedule` |
 
@@ -92,20 +123,6 @@ schema := nebo.NewSchema("list", "create", "delete").
     Number("limit", "Max results", false).
     Bool("verbose", "Show details", false).
     Enum("format", "Output format", false, "json", "text").
-    Build()
-```
-
-## View Builder
-
-Build structured UI views:
-
-```go
-view := nebo.NewView("dashboard", "My Dashboard").
-    Heading("title", "Status", "h2").
-    Text("info", "All systems operational").
-    Button("refresh", "Refresh", "primary").
-    Divider("sep").
-    Input("search", "", "Search...").
     Build()
 ```
 
