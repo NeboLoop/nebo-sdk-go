@@ -30,7 +30,7 @@ const (
 //
 // UIService is the interface for apps that provide a configuration UI.
 // Apps serve their own HTML/CSS/JS frontend. Nebo proxies HTTP requests
-// through gRPC over the existing Unix socket.
+// through gRPC to the app's loopback address, with its launch token.
 type UIServiceClient interface {
 	// HealthCheck verifies the app is running.
 	HealthCheck(ctx context.Context, in *HealthCheckRequest, opts ...grpc.CallOption) (*HealthCheckResponse, error)
@@ -86,7 +86,7 @@ func (c *uIServiceClient) HandleRequest(ctx context.Context, in *HttpRequest, op
 //
 // UIService is the interface for apps that provide a configuration UI.
 // Apps serve their own HTML/CSS/JS frontend. Nebo proxies HTTP requests
-// through gRPC over the existing Unix socket.
+// through gRPC to the app's loopback address, with its launch token.
 type UIServiceServer interface {
 	// HealthCheck verifies the app is running.
 	HealthCheck(context.Context, *HealthCheckRequest) (*HealthCheckResponse, error)
